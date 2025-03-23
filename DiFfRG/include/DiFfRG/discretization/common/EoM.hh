@@ -95,6 +95,31 @@ namespace DiFfRG
       return origin;
     }
 
+    template <typename VectorType, typename EoMFUN>
+    std::tuple<bool, Point<1>>
+    invesitgate_1d_eom_at_origin(typename dealii::DoFHandler<1>::cell_iterator &EoM_cell,
+                                 Functions::FEFieldFunction<1, VectorType> &fe_function, const EoMFUN &get_EoM,
+                                 const dealii::DoFHandler<1> &dof_handler,
+                                 Vector<typename VectorType::value_type> &values, const double EoM_abs_tol = 1e-8)
+    {
+      const uint dim = 1;
+      const auto origin = internal::get_origin(dof_handler, EoM_cell);
+      fe_function.set_active_cell(EoM_cell);
+      fe_function.vector_value(origin, values);
+      const auto origin_val = get_EoM(origin, values);
+
+      const auto secondary_point = (origin + EoM_cell->center()) / 2.;
+      fe_function.vector_value(secondary_point, values);
+      const auto secondary_val = get_EoM(secondary_point, values);
+
+      bool origin_EoM = true;
+      bool secondary_EoM = true;
+      for (uint d = 0; d < dim; ++d) {
+        origin_EoM = origin_EoM && (origin_val[d] > EoM_abs_tol);
+        secondary_EoM = secondary_EoM && (secondary_val[d] > 0);
+      }
+      return {origin_EoM && secondary_EoM, origin};
+    }
   } // namespace internal
 
   /**
@@ -118,66 +143,42 @@ namespace DiFfRG
   dealii::Point<1> get_EoM_point_1D(
       typename dealii::DoFHandler<1>::cell_iterator &EoM_cell, const VectorType &sol,
       const dealii::DoFHandler<1> &dof_handler, const dealii::Mapping<1> &mapping, const EoMFUN &get_EoM,
-      const EoMPFUN &EoM_postprocess = [](const auto &p, const auto &values) { return p; },
+      const EoMPFUN &EoM_postprocess = [](const auto &p, const auto & /* values */) { return p; },
       const double EoM_abs_tol = 1e-8, const uint max_iter = 100)
   {
     constexpr uint dim = 1;
 
     using namespace dealii;
     using CellIterator = typename dealii::DoFHandler<dim>::cell_iterator;
-    using EoMType = std::array<double, dim>;
 
-    auto EoM = Point<dim>();
+    auto EoM = Point<dim>(); // create solution point for EoM
     Vector<typename VectorType::value_type> values(dof_handler.get_fe().n_components());
     Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, sol, mapping);
 
-    // We start by investigating the origin.
-    const auto origin = internal::get_origin(dof_handler, EoM_cell);
-    fe_function.set_active_cell(EoM_cell);
-    fe_function.vector_value(origin, values);
-    const auto origin_val = get_EoM(origin, values);
+    auto [has_EOM_at_origin, origin] =
+        internal::invesitgate_1d_eom_at_origin(EoM_cell, fe_function, get_EoM, dof_handler, values, EoM_abs_tol);
 
-    const auto secondary_point = (origin + EoM_cell->center()) / 2.;
-    fe_function.vector_value(secondary_point, values);
-    const auto secondary_val = get_EoM(secondary_point, values);
-
-    bool origin_EoM = true;
-    bool secondary_EoM = true;
-    for (uint d = 0; d < dim; ++d) {
-      origin_EoM = origin_EoM && (origin_val[d] > EoM_abs_tol);
-      secondary_EoM = secondary_EoM && (secondary_val[d] > 0);
-    }
-
-    if (origin_EoM && secondary_EoM) {
+    if (has_EOM_at_origin) {
       EoM = origin;
       return EoM;
     }
 
     auto check_cell = [&](const CellIterator &cell) {
-      // Obtain the values at the vertices of the cell.
-      std::array<double, GeometryInfo<dim>::vertices_per_cell> EoM_vals;
-      std::array<Point<dim>, GeometryInfo<dim>::vertices_per_cell> vertices;
-      // Vector<typename VectorType::value_type> values(dof_handler.get_fe().n_components());
-      // Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, sol, mapping);
-
-      fe_function.set_active_cell(cell);
-      for (uint i = 0; i < GeometryInfo<dim>::vertices_per_cell; ++i) {
-        vertices[i] = cell->vertex(i);
-        fe_function.vector_value(vertices[i], values);
-        EoM_vals[i] = get_EoM(vertices[i], values)[0];
-      }
-
-      bool cell_has_EoM = false;
       // Find if the cell has an EoM point, i.e. if the values at some vertices have different signs.
-      for (uint i = 0; i < GeometryInfo<dim>::vertices_per_cell; ++i)
-        for (uint j = 0; j < i; ++j)
-          if (EoM_vals[i] * EoM_vals[j] < 0.) {
-            cell_has_EoM = true;
-            i = GeometryInfo<dim>::vertices_per_cell;
-            break;
+      for (uint i = 0; i < GeometryInfo<dim>::vertices_per_cell; ++i) {
+        auto vertex_1 = cell->vertex(i);
+        fe_function.vector_value(vertex_1, values);
+        auto EoM_val_1 = get_EoM(vertex_1, values)[0];
+        for (uint j = 0; j < i; ++j) {
+          auto vertex_2 = cell->vertex(j);
+          fe_function.vector_value(vertex_2, values);
+          auto EoM_val_2 = get_EoM(vertex_2, values)[0];
+          if (EoM_val_1 * EoM_val_2 < 0.) {
+            return true;
           }
-
-      return cell_has_EoM;
+        }
+      }
+      return false;
     };
 
     auto find_EoM = [&](const CellIterator &cell, CellIterator &m_EoM_cell, Point<dim> &m_EoM,
@@ -197,6 +198,7 @@ namespace DiFfRG
       double err = 1e100;
       uint iter = 0;
 
+      // run a divide and conquer algorithm based on the mean-value theorem
       while (err > EoM_abs_tol) {
         if (EoM_val < 0.)
           p1 = p;
@@ -222,10 +224,6 @@ namespace DiFfRG
       return true;
     };
 
-    std::vector<typename dealii::DoFHandler<dim>::cell_iterator> cell_candidates;
-    std::vector<double> value_candidates;
-    std::vector<Point<dim>> EoM_candidates;
-
     CellIterator t_EoM_cell;
     Point<dim> t_EoM;
     double t_EoM_value = 0.;
@@ -238,11 +236,9 @@ namespace DiFfRG
           EoM = t_EoM;
           return EoM;
         }
-        cell_candidates.push_back(t_EoM_cell);
-        value_candidates.push_back(std::abs(t_EoM_value));
-        EoM_candidates.push_back(t_EoM);
       }
 
+    // Go through the grind and find all points, containing a root which are attached to cannidates
     for (const auto &cell : dof_handler.active_cell_iterators())
       if (check_cell(cell)) {
         if (find_EoM(cell, t_EoM_cell, t_EoM, t_EoM_value)) {
@@ -250,30 +246,11 @@ namespace DiFfRG
           EoM = t_EoM;
           return EoM;
         }
-        cell_candidates.push_back(t_EoM_cell);
-        value_candidates.push_back(std::abs(t_EoM_value));
-        EoM_candidates.push_back(t_EoM);
       }
 
-    if (cell_candidates.size() == 1) {
-      EoM_cell = cell_candidates[0];
-      EoM = EoM_candidates[0];
-      return EoM;
-    } else if (cell_candidates.size() == 0) {
-      EoM_cell = GridTools::find_active_cell_around_point(dof_handler, origin);
-      return origin;
-    } else if (cell_candidates.size() > 1) {
-      // If we have more than one candidate, we choose the one with the smallest EoM value.
-      auto min_it = std::min_element(value_candidates.begin(), value_candidates.end());
-      auto min_idx = std::distance(value_candidates.begin(), min_it);
-      EoM_cell = cell_candidates[min_idx];
-      EoM = EoM_candidates[min_idx];
-      return EoM;
-    }
-
-    find_EoM(cell_candidates[0], EoM_cell, EoM, t_EoM_value);
-
-    return EoM;
+    // if nothing was found, return the origin
+    EoM_cell = GridTools::find_active_cell_around_point(dof_handler, origin);
+    return origin;
   }
 
   /**
@@ -297,7 +274,7 @@ namespace DiFfRG
   dealii::Point<dim> get_EoM_point_ND(
       typename dealii::DoFHandler<dim>::cell_iterator &EoM_cell, const VectorType &sol,
       const dealii::DoFHandler<dim> &dof_handler, const dealii::Mapping<dim> &mapping, const EoMFUN &get_EoM,
-      const EoMPFUN &EoM_postprocess = [](const auto &p, const auto &values) { return p; },
+      const EoMPFUN &EoM_postprocess = [](const auto &p, const auto & /* values */) { return p; },
       const double EoM_abs_tol = 1e-8, const uint max_iter = 100)
   {
     using namespace dealii;
@@ -662,7 +639,7 @@ namespace DiFfRG
   dealii::Point<dim> get_EoM_point(
       typename dealii::DoFHandler<dim>::cell_iterator &EoM_cell, const VectorType &sol,
       const dealii::DoFHandler<dim> &dof_handler, const dealii::Mapping<dim> &mapping, const EoMFUN &get_EoM,
-      const EoMPFUN &EoM_postprocess = [](const auto &p, const auto &values) { return p; },
+      const EoMPFUN &EoM_postprocess = [](const auto &p, const auto & /* values */) { return p; },
       const double EoM_abs_tol = 1e-5, const uint max_iter = 100)
   {
     if (max_iter == 0) return internal::get_origin(dof_handler, EoM_cell);
