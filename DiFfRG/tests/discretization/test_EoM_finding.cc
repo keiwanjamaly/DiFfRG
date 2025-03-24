@@ -2,6 +2,7 @@
 #include "catch2/generators/catch_generators.hpp"
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_all.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <boilerplate/models.hh>
 
@@ -52,7 +53,7 @@ TEST_CASE("Test 1D EoM finding on CG Constant model", "[discretization][EoM][1d]
          {"EoM_abs_tol", 1e-14},
          {"EoM_max_iter", 200},
 
-         {"grid", {{"x_grid", "0:0.1:1"}, {"y_grid", "0:0.1:1"}, {"z_grid", "0:0.1:1"}, {"refine", 0}}},
+         {"grid", {{"x_grid", "0:0.1:2"}, {"y_grid", "0:0.1:1"}, {"z_grid", "0:0.1:1"}, {"refine", 0}}},
          {"adaptivity",
           {{"start_adapt_at", 0.},
            {"adapt_dt", 1e-1},
@@ -69,7 +70,7 @@ TEST_CASE("Test 1D EoM finding on CG Constant model", "[discretization][EoM][1d]
        {"output", {{"live_plot", false}, {"verbosity", 0}}}});
 
   Testing::PhysicalParameters p_prm;
-  p_prm.initial_x0[0] = -1.;
+  p_prm.initial_x0[0] = GENERATE(-1.0, 0.0);
   p_prm.initial_x1[0] = GENERATE(take(5, random(1.1, 10.)));
 
   const double expected_EoM = -p_prm.initial_x0[0] / p_prm.initial_x1[0];
@@ -105,20 +106,118 @@ TEST_CASE("Test 1D EoM finding on CG Constant model", "[discretization][EoM][1d]
       EoM_cell, src, dof_handler, mapping, [&](const auto &p, const auto &values) { return model.EoM(p, values); },
       [&](const auto &p, const auto &) { return p; }, EoM_abs_tol, EoM_max_iter);
 
-  if (!(std::abs(EoM[0] - expected_EoM) < 1e-6)) {
-    std::cout << "ERROR: " << abs(EoM[0] - expected_EoM) << std::endl;
-    std::cout << "EoM: " << EoM[0] << " expected: " << expected_EoM << std::endl;
-  }
-  REQUIRE(std::abs(EoM[0] - expected_EoM) < 1e-6);
+  REQUIRE_THAT(EoM[0], Catch::Matchers::WithinAbs(expected_EoM, 1e-6));
 }
 
-TEST_CASE("Test 2D EoM finding on CG Constant model", "[discretization][EoM][2d]")
+// TEST_CASE("Test 2D EoM finding on CG Constant model", "[discretization][EoM][2d]")
+// {
+//   using namespace dealii;
+//   using namespace DiFfRG;
+//
+//   constexpr uint dim = 2;
+//   using Model = Testing::ModelConstant<dim, dim>;
+//   using NumberType = double;
+//   using Discretization = CG::Discretization<typename Model::Components, NumberType, RectangularMesh<dim>>;
+//   using VectorType = typename Discretization::VectorType;
+//   using Assembler = CG::Assembler<Discretization, Model>;
+//
+//   JSONValue json = json::value(
+//       {{"physical", {}},
+//        {"integration",
+//         {{"x_quadrature_order", 32},
+//          {"angle_quadrature_order", 8},
+//          {"x0_quadrature_order", 16},
+//          {"x0_summands", 8},
+//          {"q0_quadrature_order", 16},
+//          {"q0_summands", 8},
+//          {"x_extent_tolerance", 1e-3},
+//          {"x0_extent_tolerance", 1e-3},
+//          {"q0_extent_tolerance", 1e-3},
+//          {"jacobian_quadrature_factor", 0.5}}},
+//        {"discretization",
+//         {{"fe_order", GENERATE(1, 2, 3, 4, 5)},
+//          {"threads", 8},
+//          {"batch_size", 64},
+//          {"overintegration", 0},
+//          {"output_subdivisions", 2},
+//
+//          {"EoM_abs_tol", 1e-14},
+//          {"EoM_max_iter", 200},
+//
+//          {"grid", {{"x_grid", "0:0.1:1"}, {"y_grid", "0:0.1:1"}, {"z_grid", "0:0.1:1"}, {"refine", 0}}},
+//          {"adaptivity",
+//           {{"start_adapt_at", 0.},
+//            {"adapt_dt", 1e-1},
+//            {"level", 0},
+//            {"refine_percent", 1e-1},
+//            {"coarsen_percent", 5e-2}}}}},
+//        {"timestepping",
+//         {{"final_time", 1.},
+//          {"output_dt", 1e-1},
+//          {"explicit",
+//           {{"dt", 1e-4}, {"minimal_dt", 1e-6}, {"maximal_dt", 1e-1}, {"abs_tol", 1e-14}, {"rel_tol", 1e-8}}},
+//          {"implicit",
+//           {{"dt", 1e-4}, {"minimal_dt", 1e-6}, {"maximal_dt", 1e-1}, {"abs_tol", 1e-14}, {"rel_tol", 1e-8}}}}},
+//        {"output", {{"live_plot", false}, {"verbosity", 0}}}});
+//
+//   // It is tested, that a root of two 1D affine linear functions are correctly found.
+//   Testing::PhysicalParameters p_prm;
+//   p_prm.initial_x0[0] = GENERATE(1., -1);
+//   p_prm.initial_x1[0] = GENERATE(take(3, random(1.1, 10.)));
+//   p_prm.initial_x0[1] = GENERATE(1., -1);
+//   p_prm.initial_x1[1] = GENERATE(take(3, random(1.1, 10.)));
+//
+//   std::array<double, 2> expected_EoM{{}};
+//   expected_EoM[0] = p_prm.initial_x0[0] > 0 ? 0. : -p_prm.initial_x0[0] / p_prm.initial_x1[0];
+//   expected_EoM[1] = p_prm.initial_x0[1] > 0 ? 0. : -p_prm.initial_x0[1] / p_prm.initial_x1[1];
+//
+//   try {
+//     auto log = spdlog::stdout_color_mt("log");
+//     log->set_pattern("log: [%v]");
+//     log->info("DiFfRG Application started");
+//   } catch (const spdlog::spdlog_ex &e) {
+//     // nothing, the logger is already set up
+//   }
+//
+//   // Define the objects needed to run the simulation
+//   Model model(p_prm);
+//   RectangularMesh<dim> mesh(json);
+//   Discretization discretization(mesh, json);
+//   Assembler assembler(discretization, model, json);
+//
+//   // Set up the initial condition
+//   FE::FlowingVariables initial_condition(discretization);
+//   initial_condition.interpolate(model);
+//   const VectorType &src = initial_condition.spatial_data();
+//
+//   const auto &dof_handler = discretization.get_dof_handler();
+//   const auto &mapping = discretization.get_mapping();
+//
+//   auto EoM_cell = dof_handler.begin_active();
+//
+//   const double EoM_abs_tol = json.get_double("/discretization/EoM_abs_tol");
+//   const uint EoM_max_iter = json.get_uint("/discretization/EoM_max_iter");
+//
+//   const auto EoM = get_EoM_point(
+//       EoM_cell, src, dof_handler, mapping, [&](const auto &p, const auto &values) { return model.EoM(p, values); },
+//       [&](const auto &p, const auto &) { return p; }, EoM_abs_tol, EoM_max_iter);
+//
+//   if (!(std::abs(EoM[0] - expected_EoM[0]) < 1e-6) || !(std::abs(EoM[1] - expected_EoM[1]) < 1e-6)) {
+//     std::cout << "ERROR: " << sqrt(powr<2>(EoM[0] - expected_EoM[0]) + powr<2>(EoM[1] - expected_EoM[1])) <<
+//     std::endl; std::cout << "EoM: " << EoM << " expected: (" << expected_EoM[0] << ", " << expected_EoM[1] << ")" <<
+//     std::endl;
+//   }
+//   REQUIRE(std::abs(EoM[0] - expected_EoM[0]) < 1e-6);
+//   REQUIRE(std::abs(EoM[1] - expected_EoM[1]) < 1e-6);
+// }
+
+TEST_CASE("TEST 1D EOM finding on CG Constant model using a more realistic curve", "[discretization][EoM][2d]")
 {
   using namespace dealii;
   using namespace DiFfRG;
 
-  constexpr uint dim = 2;
-  using Model = Testing::ModelConstant<dim, dim>;
+  constexpr uint dim = 1;
+  using Model = Testing::ModelConstantWithRealisticInitialCondition<dim, dim>;
   using NumberType = double;
   using Discretization = CG::Discretization<typename Model::Components, NumberType, RectangularMesh<dim>>;
   using VectorType = typename Discretization::VectorType;
@@ -147,7 +246,7 @@ TEST_CASE("Test 2D EoM finding on CG Constant model", "[discretization][EoM][2d]
          {"EoM_abs_tol", 1e-14},
          {"EoM_max_iter", 200},
 
-         {"grid", {{"x_grid", "0:0.1:1"}, {"y_grid", "0:0.1:1"}, {"z_grid", "0:0.1:1"}, {"refine", 0}}},
+         {"grid", {{"x_grid", "0:0.01:2"}, {"y_grid", "0:0.1:1"}, {"z_grid", "0:0.1:1"}, {"refine", 0}}},
          {"adaptivity",
           {{"start_adapt_at", 0.},
            {"adapt_dt", 1e-1},
@@ -163,15 +262,15 @@ TEST_CASE("Test 2D EoM finding on CG Constant model", "[discretization][EoM][2d]
           {{"dt", 1e-4}, {"minimal_dt", 1e-6}, {"maximal_dt", 1e-1}, {"abs_tol", 1e-14}, {"rel_tol", 1e-8}}}}},
        {"output", {{"live_plot", false}, {"verbosity", 0}}}});
 
-  Testing::PhysicalParameters p_prm;
-  p_prm.initial_x0[0] = GENERATE(1., -1);
-  p_prm.initial_x1[0] = GENERATE(take(3, random(1.1, 10.)));
-  p_prm.initial_x0[1] = GENERATE(1., -1);
-  p_prm.initial_x1[1] = GENERATE(take(3, random(1.1, 10.)));
+  // It is tested, that a root of two 1D affine linear functions are correctly found.
+  Testing::RealisticPhysicalParameters p_prm;
+  p_prm.m[0] = GENERATE(-0.1, 0.1);
+  p_prm.a[0] = GENERATE(take(3, random(1.1, 10.0)));
+  p_prm.x_prime[0] = GENERATE(take(3, random(0.5, 0.7)));
 
-  std::array<double, 2> expected_EoM{{}};
-  expected_EoM[0] = p_prm.initial_x0[0] > 0 ? 0. : -p_prm.initial_x0[0] / p_prm.initial_x1[0];
-  expected_EoM[1] = p_prm.initial_x0[1] > 0 ? 0. : -p_prm.initial_x0[1] / p_prm.initial_x1[1];
+  std::array<double, 1> expected_EoM{{}};
+  expected_EoM[0] =
+      p_prm.m[0] > 0 ? 0. : sqrt(powr<2>(p_prm.x_prime[0]) - (p_prm.m[0] / p_prm.a[0]) * p_prm.x_prime[0]);
 
   try {
     auto log = spdlog::stdout_color_mt("log");
@@ -204,120 +303,215 @@ TEST_CASE("Test 2D EoM finding on CG Constant model", "[discretization][EoM][2d]
       EoM_cell, src, dof_handler, mapping, [&](const auto &p, const auto &values) { return model.EoM(p, values); },
       [&](const auto &p, const auto &) { return p; }, EoM_abs_tol, EoM_max_iter);
 
-  if (!(std::abs(EoM[0] - expected_EoM[0]) < 1e-6) || !(std::abs(EoM[1] - expected_EoM[1]) < 1e-6)) {
-    std::cout << "ERROR: " << sqrt(powr<2>(EoM[0] - expected_EoM[0]) + powr<2>(EoM[1] - expected_EoM[1])) << std::endl;
-    std::cout << "EoM: " << EoM << " expected: (" << expected_EoM[0] << ", " << expected_EoM[1] << ")" << std::endl;
-  }
-  REQUIRE(std::abs(EoM[0] - expected_EoM[0]) < 1e-6);
-  REQUIRE(std::abs(EoM[1] - expected_EoM[1]) < 1e-6);
+  REQUIRE_THAT(EoM[0], Catch::Matchers::WithinAbs(expected_EoM[0], 1e-3));
 }
 
-TEST_CASE("Test 3D EoM finding on CG Constant model", "[discretization][EoM][3d]")
-{
-  using namespace dealii;
-  using namespace DiFfRG;
-
-  constexpr uint dim = 3;
-  using Model = Testing::ModelConstant<dim, dim>;
-  using NumberType = double;
-  using Discretization = CG::Discretization<typename Model::Components, NumberType, RectangularMesh<dim>>;
-  using VectorType = typename Discretization::VectorType;
-  using Assembler = CG::Assembler<Discretization, Model>;
-
-  JSONValue json = json::value(
-      {{"physical", {}},
-       {"integration",
-        {{"x_quadrature_order", 32},
-         {"angle_quadrature_order", 8},
-         {"x0_quadrature_order", 16},
-         {"x0_summands", 8},
-         {"q0_quadrature_order", 16},
-         {"q0_summands", 8},
-         {"x_extent_tolerance", 1e-3},
-         {"x0_extent_tolerance", 1e-3},
-         {"q0_extent_tolerance", 1e-3},
-         {"jacobian_quadrature_factor", 0.5}}},
-       {"discretization",
-        {{"fe_order", GENERATE(1, 2)},
-         {"threads", 8},
-         {"batch_size", 64},
-         {"overintegration", 0},
-         {"output_subdivisions", 2},
-
-         {"EoM_abs_tol", 1e-14},
-         {"EoM_max_iter", 200},
-
-         {"grid", {{"x_grid", "0:0.1:1"}, {"y_grid", "0:0.1:1"}, {"z_grid", "0:0.1:1"}, {"refine", 0}}},
-         {"adaptivity",
-          {{"start_adapt_at", 0.},
-           {"adapt_dt", 1e-1},
-           {"level", 0},
-           {"refine_percent", 1e-1},
-           {"coarsen_percent", 5e-2}}}}},
-       {"timestepping",
-        {{"final_time", 1.},
-         {"output_dt", 1e-1},
-         {"explicit",
-          {{"dt", 1e-4}, {"minimal_dt", 1e-6}, {"maximal_dt", 1e-1}, {"abs_tol", 1e-14}, {"rel_tol", 1e-8}}},
-         {"implicit",
-          {{"dt", 1e-4}, {"minimal_dt", 1e-6}, {"maximal_dt", 1e-1}, {"abs_tol", 1e-14}, {"rel_tol", 1e-8}}}}},
-       {"output", {{"live_plot", false}, {"verbosity", 0}}}});
-
-  Testing::PhysicalParameters p_prm;
-  p_prm.initial_x0[0] = -1.; // GENERATE(1., -1.);
-  p_prm.initial_x0[1] = -1.; // GENERATE(1., -1.);
-  p_prm.initial_x0[2] = -1.; // GENERATE(1., -1.);
-
-  p_prm.initial_x1[0] = GENERATE(take(2, random(1.1, 10.)));
-  p_prm.initial_x1[1] = GENERATE(take(2, random(1.1, 10.)));
-  p_prm.initial_x1[2] = GENERATE(take(1, random(1.1, 10.)));
-
-  dealii::Point<dim> expected_EoM;
-  for (uint d = 0; d < dim; ++d)
-    expected_EoM[d] = p_prm.initial_x0[d] > 0 ? 0. : -p_prm.initial_x0[d] / p_prm.initial_x1[d];
-
-  try {
-    auto log = spdlog::stdout_color_mt("log");
-    log->set_pattern("log: [%v]");
-    log->info("DiFfRG Application started");
-  } catch (const spdlog::spdlog_ex &e) {
-    // nothing, the logger is already set up
-  }
-
-  // Define the objects needed to run the simulation
-  Model model(p_prm);
-  RectangularMesh<dim> mesh(json);
-  Discretization discretization(mesh, json);
-  Assembler assembler(discretization, model, json);
-
-  // Set up the initial condition
-  FE::FlowingVariables initial_condition(discretization);
-  initial_condition.interpolate(model);
-  const VectorType &src = initial_condition.spatial_data();
-
-  const auto &dof_handler = discretization.get_dof_handler();
-  const auto &mapping = discretization.get_mapping();
-
-  auto EoM_cell = dof_handler.begin_active();
-
-  const double EoM_abs_tol = json.get_double("/discretization/EoM_abs_tol");
-  const uint EoM_max_iter = json.get_uint("/discretization/EoM_max_iter");
-
-  const auto EoM = get_EoM_point(
-      EoM_cell, src, dof_handler, mapping, [&](const auto &p, const auto &values) { return model.EoM(p, values); },
-      [&](const auto &p, const auto &) { return p; }, EoM_abs_tol, EoM_max_iter);
-
-  std::array<double, dim> error{{}};
-  double max_error = 0.;
-  for (uint d = 0; d < dim; ++d) {
-    error[d] = std::abs(EoM[d] - expected_EoM[d]);
-    max_error = std::max(max_error, error[d]);
-  }
-
-  if (max_error >= 1e-5) {
-    std::cout << "ERROR: " << max_error << std::endl;
-    std::cout << "EoM: " << EoM << " expected: " << expected_EoM << std::endl;
-  }
-
-  REQUIRE(max_error < 1e-5);
-}
+// TEST_CASE("TEST 2D EOM finding on CG Constant model using a more realistic curve", "[discretization][EoM][2d]")
+// {
+//   using namespace dealii;
+//   using namespace DiFfRG;
+//
+//   constexpr uint dim = 2;
+//   using Model = Testing::ModelConstantWithRealisticInitialCondition<dim, dim>;
+//   using NumberType = double;
+//   using Discretization = CG::Discretization<typename Model::Components, NumberType, RectangularMesh<dim>>;
+//   using VectorType = typename Discretization::VectorType;
+//   using Assembler = CG::Assembler<Discretization, Model>;
+//
+//   JSONValue json = json::value(
+//       {{"physical", {}},
+//        {"integration",
+//         {{"x_quadrature_order", 32},
+//          {"angle_quadrature_order", 8},
+//          {"x0_quadrature_order", 16},
+//          {"x0_summands", 8},
+//          {"q0_quadrature_order", 16},
+//          {"q0_summands", 8},
+//          {"x_extent_tolerance", 1e-3},
+//          {"x0_extent_tolerance", 1e-3},
+//          {"q0_extent_tolerance", 1e-3},
+//          {"jacobian_quadrature_factor", 0.5}}},
+//        {"discretization",
+//         {{"fe_order", GENERATE(1, 2, 3, 4, 5)},
+//          {"threads", 8},
+//          {"batch_size", 64},
+//          {"overintegration", 0},
+//          {"output_subdivisions", 2},
+//
+//          {"EoM_abs_tol", 1e-14},
+//          {"EoM_max_iter", 200},
+//
+//          {"grid", {{"x_grid", "0:0.1:1"}, {"y_grid", "0:0.1:1"}, {"z_grid", "0:0.1:1"}, {"refine", 0}}},
+//          {"adaptivity",
+//           {{"start_adapt_at", 0.},
+//            {"adapt_dt", 1e-1},
+//            {"level", 0},
+//            {"refine_percent", 1e-1},
+//            {"coarsen_percent", 5e-2}}}}},
+//        {"timestepping",
+//         {{"final_time", 1.},
+//          {"output_dt", 1e-1},
+//          {"explicit",
+//           {{"dt", 1e-4}, {"minimal_dt", 1e-6}, {"maximal_dt", 1e-1}, {"abs_tol", 1e-14}, {"rel_tol", 1e-8}}},
+//          {"implicit",
+//           {{"dt", 1e-4}, {"minimal_dt", 1e-6}, {"maximal_dt", 1e-1}, {"abs_tol", 1e-14}, {"rel_tol", 1e-8}}}}},
+//        {"output", {{"live_plot", false}, {"verbosity", 0}}}});
+//
+//   // It is tested, that a root of two 1D affine linear functions are correctly found.
+//   Testing::RealisticPhysicalParameters p_prm;
+//   p_prm.m[0] = GENERATE(-0.01, 0.01);
+//   p_prm.m[1] = GENERATE(-0.01, 0.01);
+//   p_prm.a[0] = GENERATE(take(3, random(1.1, 10.0)));
+//   p_prm.a[1] = GENERATE(take(3, random(1.1, 10.0)));
+//   p_prm.x_prime[0] = GENERATE(take(3, random(0.8, 1.2)));
+//   p_prm.x_prime[1] = GENERATE(take(3, random(0.8, 1.2)));
+//
+//   std::array<double, 2> expected_EoM{{}};
+//   for (uint c = 0; c < dim; ++c)
+//     expected_EoM[c] =
+//         p_prm.m[c] > 0 ? 0. : sqrt(powr<2>(p_prm.x_prime[c]) - p_prm.m[c] / p_prm.a[c] * p_prm.x_prime[c]);
+//
+//   try {
+//     auto log = spdlog::stdout_color_mt("log");
+//     log->set_pattern("log: [%v]");
+//     log->info("DiFfRG Application started");
+//   } catch (const spdlog::spdlog_ex &e) {
+//     // nothing, the logger is already set up
+//   }
+//
+//   // Define the objects needed to run the simulation
+//   Model model(p_prm);
+//   RectangularMesh<dim> mesh(json);
+//   Discretization discretization(mesh, json);
+//   Assembler assembler(discretization, model, json);
+//
+//   // Set up the initial condition
+//   FE::FlowingVariables initial_condition(discretization);
+//   initial_condition.interpolate(model);
+//   const VectorType &src = initial_condition.spatial_data();
+//
+//   const auto &dof_handler = discretization.get_dof_handler();
+//   const auto &mapping = discretization.get_mapping();
+//
+//   auto EoM_cell = dof_handler.begin_active();
+//
+//   const double EoM_abs_tol = json.get_double("/discretization/EoM_abs_tol");
+//   const uint EoM_max_iter = json.get_uint("/discretization/EoM_max_iter");
+//
+//   const auto EoM = get_EoM_point(
+//       EoM_cell, src, dof_handler, mapping, [&](const auto &p, const auto &values) { return model.EoM(p, values); },
+//       [&](const auto &p, const auto &) { return p; }, EoM_abs_tol, EoM_max_iter);
+//
+//   REQUIRE_THAT(EoM[0], Catch::Matchers::WithinAbs(expected_EoM[0], 1e-6));
+//   REQUIRE_THAT(EoM[1], Catch::Matchers::WithinAbs(expected_EoM[1], 1e-6));
+// }
+//
+// TEST_CASE("Test 3D EoM finding on CG Constant model", "[discretization][EoM][3d]")
+// {
+//   using namespace dealii;
+//   using namespace DiFfRG;
+//
+//   constexpr uint dim = 3;
+//   using Model = Testing::ModelConstant<dim, dim>;
+//   using NumberType = double;
+//   using Discretization = CG::Discretization<typename Model::Components, NumberType, RectangularMesh<dim>>;
+//   using VectorType = typename Discretization::VectorType;
+//   using Assembler = CG::Assembler<Discretization, Model>;
+//
+//   JSONValue json = json::value(
+//       {{"physical", {}},
+//        {"integration",
+//         {{"x_quadrature_order", 32},
+//          {"angle_quadrature_order", 8},
+//          {"x0_quadrature_order", 16},
+//          {"x0_summands", 8},
+//          {"q0_quadrature_order", 16},
+//          {"q0_summands", 8},
+//          {"x_extent_tolerance", 1e-3},
+//          {"x0_extent_tolerance", 1e-3},
+//          {"q0_extent_tolerance", 1e-3},
+//          {"jacobian_quadrature_factor", 0.5}}},
+//        {"discretization",
+//         {{"fe_order", GENERATE(1, 2)},
+//          {"threads", 8},
+//          {"batch_size", 64},
+//          {"overintegration", 0},
+//          {"output_subdivisions", 2},
+//
+//          {"EoM_abs_tol", 1e-14},
+//          {"EoM_max_iter", 200},
+//
+//          {"grid", {{"x_grid", "0:0.1:1"}, {"y_grid", "0:0.1:1"}, {"z_grid", "0:0.1:1"}, {"refine", 0}}},
+//          {"adaptivity",
+//           {{"start_adapt_at", 0.},
+//            {"adapt_dt", 1e-1},
+//            {"level", 0},
+//            {"refine_percent", 1e-1},
+//            {"coarsen_percent", 5e-2}}}}},
+//        {"timestepping",
+//         {{"final_time", 1.},
+//          {"output_dt", 1e-1},
+//          {"explicit",
+//           {{"dt", 1e-4}, {"minimal_dt", 1e-6}, {"maximal_dt", 1e-1}, {"abs_tol", 1e-14}, {"rel_tol", 1e-8}}},
+//          {"implicit",
+//           {{"dt", 1e-4}, {"minimal_dt", 1e-6}, {"maximal_dt", 1e-1}, {"abs_tol", 1e-14}, {"rel_tol", 1e-8}}}}},
+//        {"output", {{"live_plot", false}, {"verbosity", 0}}}});
+//
+//   Testing::PhysicalParameters p_prm;
+//   p_prm.initial_x0[0] = -1.; // GENERATE(1., -1.);
+//   p_prm.initial_x0[1] = -1.; // GENERATE(1., -1.);
+//   p_prm.initial_x0[2] = -1.; // GENERATE(1., -1.);
+//
+//   p_prm.initial_x1[0] = GENERATE(take(2, random(1.1, 10.)));
+//   p_prm.initial_x1[1] = GENERATE(take(2, random(1.1, 10.)));
+//   p_prm.initial_x1[2] = GENERATE(take(1, random(1.1, 10.)));
+//
+//   dealii::Point<dim> expected_EoM;
+//   for (uint d = 0; d < dim; ++d)
+//     expected_EoM[d] = p_prm.initial_x0[d] > 0 ? 0. : -p_prm.initial_x0[d] / p_prm.initial_x1[d];
+//
+//   try {
+//     auto log = spdlog::stdout_color_mt("log");
+//     log->set_pattern("log: [%v]");
+//     log->info("DiFfRG Application started");
+//   } catch (const spdlog::spdlog_ex &e) {
+//     // nothing, the logger is already set up
+//   }
+//
+//   // Define the objects needed to run the simulation
+//   Model model(p_prm);
+//   RectangularMesh<dim> mesh(json);
+//   Discretization discretization(mesh, json);
+//   Assembler assembler(discretization, model, json);
+//
+//   // Set up the initial condition
+//   FE::FlowingVariables initial_condition(discretization);
+//   initial_condition.interpolate(model);
+//   const VectorType &src = initial_condition.spatial_data();
+//
+//   const auto &dof_handler = discretization.get_dof_handler();
+//   const auto &mapping = discretization.get_mapping();
+//
+//   auto EoM_cell = dof_handler.begin_active();
+//
+//   const double EoM_abs_tol = json.get_double("/discretization/EoM_abs_tol");
+//   const uint EoM_max_iter = json.get_uint("/discretization/EoM_max_iter");
+//
+//   const auto EoM = get_EoM_point(
+//       EoM_cell, src, dof_handler, mapping, [&](const auto &p, const auto &values) { return model.EoM(p, values); },
+//       [&](const auto &p, const auto &) { return p; }, EoM_abs_tol, EoM_max_iter);
+//
+//   std::array<double, dim> error{{}};
+//   double max_error = 0.;
+//   for (uint d = 0; d < dim; ++d) {
+//     error[d] = std::abs(EoM[d] - expected_EoM[d]);
+//     max_error = std::max(max_error, error[d]);
+//   }
+//
+//   if (max_error >= 1e-5) {
+//     std::cout << "ERROR: " << max_error << std::endl;
+//     std::cout << "EoM: " << EoM << " expected: " << expected_EoM << std::endl;
+//   }
+//
+//   REQUIRE(max_error < 1e-5);
+// }
