@@ -53,7 +53,22 @@ namespace DiFfRG
         return false;
       }
     }
-
+    template <int dim, typename VectorType> struct powell_params {
+      Functions::FEFieldFunction<dim, VectorType> &fe_functions_as_param;
+    };
+    template <int dim, typename VectorType> int f_function(const gsl_vector *x, void *params, gsl_vector *f)
+    {
+      Point<dim> eval_point;
+      for (uint component = 0; component < dim; component++) {
+        eval_point[component] = gsl_vector_get(x, component);
+      }
+      for (uint component = 0; component < dim; component++) {
+        double y0 = static_cast<struct powell_params<dim, VectorType> *>(params)->fe_functions_as_param.value(
+            eval_point, component);
+        gsl_vector_set(f, component, y0);
+      }
+      return GSL_SUCCESS;
+    };
     template <int dim> double l1_norm(const Point<dim> &p)
     {
       double norm = 0.;
@@ -85,82 +100,113 @@ namespace DiFfRG
    * @param EoM_abs_tol the relative tolerance for the bisection method.
    * @return Point<dim> the point where the EoM is zero.
    */
-  template <typename VectorType, typename EoMFUN, typename EoMPFUN>
-  dealii::Point<1> get_EoM_point_1D(
-      typename dealii::DoFHandler<1>::cell_iterator &EoM_cell, const VectorType &sol,
-      const dealii::DoFHandler<1> &dof_handler, const dealii::Mapping<1> &mapping, const EoMFUN &get_EoM,
+  template <int dim, typename VectorType, typename EoMFUN, typename EoMPFUN>
+  dealii::Point<dim> get_EoM_point(
+      typename dealii::DoFHandler<dim>::cell_iterator &EoM_cell, const VectorType &sol,
+      const dealii::DoFHandler<dim> &dof_handler, const dealii::Mapping<dim> &mapping, const EoMFUN &get_EoM,
       const EoMPFUN &EoM_postprocess = [](const auto &p, const auto & /* values */) { return p; },
-      const double EoM_abs_tol = 1e-8, const uint max_iter = 100)
+      const double EoM_abs_tol = 1e-5, const uint max_iter = 100)
   {
-    constexpr uint dim = 1;
+    // constexpr uint dim = 1;
 
     using namespace dealii;
     Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, sol, mapping);
 
-    auto get_vertex_minimum_of_cell = [](const ReferenceCell &cell) -> Point<1> {
-      const auto vertex_number = cell.n_vertices();
-      Point<dim> min_vertex = cell.vertex<dim>(0);
+    auto get_vertex_minimum_of_cell = [](typename DoFHandler<dim>::cell_iterator cell) -> Point<dim> {
+      const auto vertex_number = cell->n_vertices();
+      Point<dim> min_vertex = cell->vertex(0);
       for (uint i = 1; i < vertex_number; i++) {
-        Point<dim> vertex_i = cell.vertex<dim>(i);
+        Point<dim> vertex_i = cell->vertex(i);
         min_vertex = std::min(min_vertex, vertex_i, internal::point_comperator<dim>);
       }
       return min_vertex;
     };
 
-    auto check_zero_crossing_in_cell = [&fe_function](const ReferenceCell &reference_cell,
-                                                      dealii::DoFHandler<dim>::cell_iterator cell) -> bool {
-      const auto vertex_number = reference_cell.n_vertices();
-      for (uint i = 0; i < vertex_number; i++)
-        for (uint j = 0; j < i; j++) {
-          Point<dim> point_1 = cell->vertex(i);
-          Point<dim> point_2 = cell->vertex(j);
-          double value_1 = fe_function.value(point_1);
-          double value_2 = fe_function.value(point_2);
-          if (value_1 * value_2 < 0.0) {
-            return true;
+    auto check_zero_crossing_in_cell = [&fe_function](typename DoFHandler<dim>::cell_iterator cell) -> bool {
+      // const auto vertex_number = reference_cell.n_vertices();
+      const auto vertex_number = cell->n_vertices();
+
+      uint component = 0;
+      bool component_has_EoM;
+      do {
+        component_has_EoM = false;
+        for (uint i = 0; i < vertex_number; i++)
+          for (uint j = 0; j < i; j++) {
+            Point<dim> point_1 = cell->vertex(i);
+            Point<dim> point_2 = cell->vertex(j);
+            auto value_1 = fe_function.value(point_1, component);
+            auto value_2 = fe_function.value(point_2, component);
+            // std::cout << "component: " << component << ", value 1: " << value_1 << ", value 2: " << value_2
+            //           << std::endl;
+            component_has_EoM = component_has_EoM or ((value_1 * value_2) <= 0.0);
           }
-        }
-      return false;
+        component++;
+      } while (component < fe_function.n_components && component_has_EoM);
+      return component_has_EoM;
     };
 
     auto compute_cell_minimum = [&fe_function, EoM_abs_tol,
-                                 max_iter](const ReferenceCell &referece_cell,
-                                           dealii::DoFHandler<dim>::cell_iterator cell) -> Point<dim> {
-      // apply a divide a conquer method to find the minimum.
-      Point<dim> point_1 = cell->vertex(0);
-      Point<dim> point_2 = cell->vertex(1);
-      for (uint i = 0; i < max_iter; i++) {
-        Point<dim> midpoint = (point_1 + point_2) / 2;
-        double EoM_val = fe_function.value(midpoint);
-        if (EoM_val < 0.0) {
-          point_1 = midpoint;
-        } else {
-          point_2 = midpoint;
-        }
-        if ((point_1 - point_2).norm() < EoM_abs_tol) {
-          return midpoint;
-        }
+                                 max_iter](typename DoFHandler<dim>::cell_iterator cell) -> Point<dim> {
+      int status;
+      int iter = 0;
+
+      struct internal::powell_params<dim, VectorType> params = {
+        fe_function
+      };
+      uint components = fe_function.n_components;
+      gsl_multiroot_function f = {&internal::f_function<dim, VectorType>, dim, &params};
+      const gsl_multiroot_fsolver_type *T = gsl_multiroot_fsolver_dnewton;
+      gsl_multiroot_fsolver *s = gsl_multiroot_fsolver_alloc(T, components);
+      gsl_vector *x = gsl_vector_alloc(dim);
+
+      const auto vertex_number = cell->n_vertices();
+      Point<dim> midpoint = Point<dim>();
+      for (uint i = 0; i < vertex_number; i++) {
+        midpoint += cell->vertex(i);
       }
-      throw std::runtime_error("could not find EoM");
+      midpoint /= static_cast<double>(vertex_number);
+
+      Point<dim> point_1 = cell->vertex(0);
+      for (uint i = 0; i < dim; i++) {
+        gsl_vector_set(x, i, midpoint[i]);
+      }
+
+      gsl_multiroot_fsolver_set(s, &f, x);
+      do {
+        iter++;
+        status = gsl_multiroot_fsolver_iterate(s);
+
+        if (status) /* check if solver is stuck */
+          break;
+
+        status = gsl_multiroot_test_residual(s->f, EoM_abs_tol);
+      } while (status == GSL_CONTINUE && iter < max_iter);
+      for (uint i = 0; i < dim; i++) {
+        midpoint[i] = gsl_vector_get(s->x, i);
+      }
+      gsl_multiroot_fsolver_free(s);
+      gsl_vector_free(x);
+
+      return midpoint;
     };
 
-    DoFHandler<dim>::cell_iterator origin_Cell = dof_handler.begin_active();
-    Point<dim> origin_point = get_vertex_minimum_of_cell(origin_Cell->reference_cell());
+    typename DoFHandler<dim>::cell_iterator origin_Cell = dof_handler.begin_active();
+    Point<dim> origin_point = get_vertex_minimum_of_cell(origin_Cell);
 
     for (auto &cell : dof_handler.active_cell_iterators()) {
       fe_function.set_active_cell(cell); // setting the current cell, enhances performance
-      auto reference_cell = cell->reference_cell();
       // compute the origin in each iteration
-      Point<dim> cell_minimum = get_vertex_minimum_of_cell(reference_cell);
+      Point<dim> cell_minimum = get_vertex_minimum_of_cell(cell);
       origin_point = std::min(origin_point, cell_minimum, internal::point_comperator<dim>);
       // check if the current cell contains a minimum (zero crossing)
-      if (check_zero_crossing_in_cell(reference_cell, cell)) {
-        return compute_cell_minimum(reference_cell, cell);
+      if (check_zero_crossing_in_cell(cell)) {
+        std::cout << "hello" << std::endl;
+        return compute_cell_minimum(cell);
       }
     }
 
     // if nothing was found, return the origin
-    EoM_cell = GridTools::find_active_cell_around_point(dof_handler, origin_point);
+    // EoM_cell = GridTools::find_active_cell_around_point(dof_handler, origin_point);
     return origin_point;
   }
 
@@ -532,37 +578,30 @@ namespace DiFfRG
   //   return EoM;
   // }
 
-  /**
-   * @brief Get the EoM point for a given solution and model.
-   *
-   * @tparam dim dimension of the problem.
-   * @tparam VectorType type of the solution vector.
-   * @tparam Model type of the model.
-   * @param EoM_cell the cell where the EoM point is located, will be set by the function. Is also used as a starting
-   * point for the search.
-   * @param sol the solution vector.
-   * @param dof_handler a DoFHandler object associated with the solution vector.
-   * @param mapping a Mapping object associated with the solution vector.
-   * @param model numerical model providing a method EoM(const VectorType &)->double which we use to find a zero
-   * crossing.
-   * @param EoM_abs_tol the relative tolerance for the bisection method.
-   * @return Point<dim> the point where the EoM is zero.
-   */
-  template <int dim, typename VectorType, typename EoMFUN, typename EoMPFUN>
-  dealii::Point<dim> get_EoM_point(
-      typename dealii::DoFHandler<dim>::cell_iterator &EoM_cell, const VectorType &sol,
-      const dealii::DoFHandler<dim> &dof_handler, const dealii::Mapping<dim> &mapping, const EoMFUN &get_EoM,
-      const EoMPFUN &EoM_postprocess = [](const auto &p, const auto & /* values */) { return p; },
-      const double EoM_abs_tol = 1e-5, const uint max_iter = 100)
-  {
-    // if (max_iter == 0) return internal::get_origin(dof_handler, EoM_cell);
-
-    if constexpr (dim == 1) {
-      return get_EoM_point_1D(EoM_cell, sol, dof_handler, mapping, get_EoM, EoM_postprocess, EoM_abs_tol, max_iter);
-    } else if constexpr (dim > 1) {
-      throw std::runtime_error("get_EoM_point is not yet implemented for dim > 1. Please set EoM_max_iter = 0.");
-      // return get_EoM_point_ND(EoM_cell, sol, dof_handler, mapping, get_EoM, EoM_postprocess, EoM_abs_tol, max_iter);
-    } else
-      throw std::runtime_error("get_EoM_point is not yet implemented for dim > 1. Please set EoM_max_iter = 0.");
-  }
+  // /**
+  //  * @brief Get the EoM point for a given solution and model.
+  //  *
+  //  * @tparam dim dimension of the problem.
+  //  * @tparam VectorType type of the solution vector.
+  //  * @tparam Model type of the model.
+  //  * @param EoM_cell the cell where the EoM point is located, will be set by the function. Is also used as a starting
+  //  * point for the search.
+  //  * @param sol the solution vector.
+  //  * @param dof_handler a DoFHandler object associated with the solution vector.
+  //  * @param mapping a Mapping object associated with the solution vector.
+  //  * @param model numerical model providing a method EoM(const VectorType &)->double which we use to find a zero
+  //  * crossing.
+  //  * @param EoM_abs_tol the relative tolerance for the bisection method.
+  //  * @return Point<dim> the point where the EoM is zero.
+  //  */
+  // template <int dim, typename VectorType, typename EoMFUN, typename EoMPFUN>
+  // dealii::Point<dim> get_EoM_point(
+  //     typename dealii::DoFHandler<dim>::cell_iterator &EoM_cell, const VectorType &sol,
+  //     const dealii::DoFHandler<dim> &dof_handler, const dealii::Mapping<dim> &mapping, const EoMFUN &get_EoM,
+  //     const EoMPFUN &EoM_postprocess = [](const auto &p, const auto & /* values */) { return p; },
+  //     const double EoM_abs_tol = 1e-5, const uint max_iter = 100)
+  // {
+  //   // if (max_iter == 0) return internal::get_origin(dof_handler, EoM_cell);
+  //   return get_EoM_point_1D(EoM_cell, sol, dof_handler, mapping, get_EoM, EoM_postprocess, EoM_abs_tol, max_iter);
+  // }
 } // namespace DiFfRG
