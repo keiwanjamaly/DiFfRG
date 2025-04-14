@@ -72,6 +72,67 @@ namespace DiFfRG
       double solution(const Point<dim> &pos) const { return prm.initial_x0[0] + prm.initial_x1[0] * pos[0]; }
     };
 
+    struct RealisticPhysicalParameters {
+      std::array<double, 3> m{{0., 0., 0.}};
+      std::array<double, 3> a{{0., 0., 0.}};
+      std::array<double, 3> x_prime{{0., 0., 0.}};
+    };
+
+    template <uint dim, uint components = 1>
+    class ModelConstantWithRealisticInitialCondition
+        : public def::AbstractModel<ModelConstantWithRealisticInitialCondition<dim, components>,
+                                    typename compFactory<components>::value>,
+          public def::Time,                                                                        // this handles time
+          public def::NoNumFlux<ModelConstantWithRealisticInitialCondition<dim, components>>,      // use no numflux
+          public def::FlowBoundaries<ModelConstantWithRealisticInitialCondition<dim, components>>, // use Inflow/Outflow
+                                                                                                   // boundaries
+          public def::AD<ModelConstantWithRealisticInitialCondition<dim, components>> // define all jacobians per AD
+    {
+    public:
+      const RealisticPhysicalParameters prm;
+
+      ModelConstantWithRealisticInitialCondition(RealisticPhysicalParameters prm) : prm(prm) {}
+      template <typename Vector> void initial_condition(const Point<dim> &pos, Vector &values) const
+      {
+        for (uint c = 0; c < components; ++c)
+          values[c] = sol(pos, c);
+      }
+
+      template <typename Vector> std::array<double, dim> EoM(const Point<dim> &x, const Vector &u) const
+      {
+        // Just to avoid warnings
+        (void)x;
+        if constexpr (dim == 1)
+          return std::array<double, dim>{{u[0]}};
+        else if constexpr (dim == 2) {
+          return std::array<double, dim>{{u[0], u[1]}};
+        } else if constexpr (dim == 3)
+          return std::array<double, dim>{{u[0], u[1], u[2]}};
+        else
+          throw std::runtime_error("Only 1, 2, and 3 dimensions are supported.");
+      }
+
+      double solution(const Point<dim> &pos) const { return sol(pos, 0); }
+
+      double sol(const Point<dim> &pos, const uint component) const
+      {
+        auto f_of_x = [](const double x, const double m) { return x * m; };
+        auto g_of_x = [](const double x, const double a, const double b) { return a * powr<2>(x) + b; };
+
+        auto c = component;
+        auto x = pos[c];
+        auto x_prime = prm.x_prime[c];
+        auto m = prm.m[c];
+        auto a = prm.a[c];
+        auto b_of_g = m * x_prime - a * powr<2>(x_prime);
+
+        if (x < x_prime) {
+          return f_of_x(x, m);
+        }
+        return g_of_x(x, a, b_of_g);
+      }
+    };
+
     template <uint dim>
     class LDGModelConstant
         : public def::AbstractModel<LDGModelConstant<dim>,

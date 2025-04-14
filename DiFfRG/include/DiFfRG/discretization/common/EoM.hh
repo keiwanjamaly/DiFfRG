@@ -5,15 +5,11 @@
 #include <deal.II/dofs/dof_handler.h>
 #include <deal.II/grid/grid_tools.h>
 #include <deal.II/numerics/fe_field_function.h>
-#include <gsl/gsl_multiroots.h>
+#include <gsl/gsl_linalg.h>
+#include <gsl/gsl_matrix.h>
 #include <gsl/gsl_vector.h>
-#include <gsl/gsl_vector_double.h>
-#include <iostream>
-#include <sys/types.h>
-#include <tbb/parallel_for.h>
 
 // standard library
-#include <algorithm>
 #include <iterator>
 #include <mutex>
 
@@ -81,6 +77,223 @@ namespace DiFfRG
     {
       return l1_norm(p1) < l1_norm(p2);
     }
+
+    template <int dim> auto get_one_active_cell_from_cell(const typename DoFHandler<dim>::cell_iterator &cell)
+    {
+      if (cell->is_active()) {
+        return cell;
+      }
+      return get_one_active_cell_from_cell<dim>(cell->child(0));
+    }
+
+    enum Direction { up = 1, down = 0 };
+    template <int dim, typename VectorType>
+    Direction get_direction(const typename DoFHandler<dim>::cell_iterator &cell,
+                            const Functions::FEFieldFunction<dim, VectorType> &fe_functions, const uint component)
+    {
+      const Point<dim> center = cell->center();
+      // std::cout << "fe_value = " << fe_functions.value(center, component) << " at " << center << std::endl;
+      if (fe_functions.value(center, component) < 0) return up;
+      return down;
+    }
+
+    template <int dim, typename VectorType>
+    bool has_EoM_in_one_component(const typename DoFHandler<dim>::cell_iterator &cell,
+                                  Functions::FEFieldFunction<dim, VectorType> &fe_functions, uint component)
+    {
+      fe_functions.set_active_cell(cell);
+      const uint n_vertices = cell->n_vertices();
+      for (uint i = 0; i < n_vertices; i++) {
+        for (uint j = 0; j < i; j++) {
+          Point<dim> point_1 = cell->vertex(i);
+          Point<dim> point_2 = cell->vertex(j);
+          auto value_1 = fe_functions.value(point_1, component);
+          auto value_2 = fe_functions.value(point_2, component);
+          if (point_1[component] > point_2[component]) {
+            std::swap(value_1, value_2);
+            std::swap(point_1, point_2);
+          }
+          if (value_1 < 0 and value_2 >= 0) return true;
+        }
+      }
+      return false;
+    }
+
+    template <int dim> uint get_face_from_direction(Direction direction, uint component)
+    {
+      return dim * component + direction;
+    }
+
+    template <int dim>
+    bool validate_face_direction(const typename DoFHandler<dim>::cell_iterator &cell, const uint face_id)
+    {
+      return !cell->at_boundary(face_id);
+    }
+
+    template <int dim, typename VectorType>
+    bool check_if_neighbouring_cells_contain_EoM(const typename DoFHandler<dim>::cell_iterator &cell,
+                                                 Functions::FEFieldFunction<dim, VectorType> &fe_functions)
+    {
+      bool neighbour_contains_EoM = true;
+      for (unsigned int face_no = 0; face_no < GeometryInfo<dim>::faces_per_cell; ++face_no) {
+        if (!cell->at_boundary(face_no)) {
+          const auto neighbor = cell->neighbor(face_no);
+          for (uint component = 0; component < dim; component++) {
+            neighbour_contains_EoM =
+                neighbour_contains_EoM && has_EoM_in_one_component<dim, VectorType>(neighbor, fe_functions, component);
+          }
+        }
+      }
+      return neighbour_contains_EoM;
+    }
+
+    template <int dim, typename VectorType>
+    std::tuple<bool, uint> get_walking_direction(const typename DoFHandler<dim>::cell_iterator &cell,
+                                                 Functions::FEFieldFunction<dim, VectorType> &fe_functions)
+    {
+      for (uint component = 0; component < dim; component++) {
+        if (!has_EoM_in_one_component<dim, VectorType>(cell, fe_functions, component)) {
+          Direction direction = get_direction(cell, fe_functions, component);
+          uint face_direction = get_face_from_direction<dim>(direction, component);
+          if (validate_face_direction<dim>(cell, face_direction)) return std::make_tuple(false, face_direction);
+        }
+      }
+      if (check_if_neighbouring_cells_contain_EoM(cell, fe_functions)) {
+        std::string error_message = "So you reached a point,";
+        error_message += " where you need to implement some feature.Apparently, there are cells,";
+        error_message +=
+            " which can contain an EoM.At the moment, the EoM handler is not able to handle such conditions,";
+        error_message +=
+            " since they are thought to be unlikely.So now you know, they are not!Have fun implementing that feature ";
+        error_message += ":)\n";
+        error_message += "Cheers Keiwan";
+        throw std::runtime_error(error_message);
+      }
+      return std::make_tuple(true, 666); // the last number has in the case of "true" no meaning
+    }
+
+    template <int dim, typename VectorType>
+    auto walk_in_direction(const typename DoFHandler<dim>::cell_iterator &cell,
+                           Functions::FEFieldFunction<dim, VectorType> &fe_functions)
+    {
+      auto [has_EoM, walking_direction] = get_walking_direction(cell, fe_functions);
+      if (has_EoM) return cell;
+      // std::cout << "walking_direction = " << walking_direction << std::endl;
+      auto new_cell = cell->neighbor(walking_direction);
+      auto active_new_cell = get_one_active_cell_from_cell<dim>(new_cell);
+      return walk_in_direction(active_new_cell, fe_functions);
+    }
+
+    template <int dim, typename VectorType>
+    std::unique_ptr<VectorType> get_fe_values(Functions::FEFieldFunction<dim, VectorType> &fe_functions,
+                                              Point<dim> &x_0)
+    {
+      auto value_vector = std::make_unique<VectorType>(dim);
+      fe_functions.vector_value(x_0, *value_vector);
+      return value_vector;
+    }
+
+    template <int dim, typename VectorType>
+    auto get_fe_jacobian(Functions::FEFieldFunction<dim, VectorType> &fe_functions, Point<dim> &x_0)
+    {
+      auto jacobian = std::make_unique<std::vector<Tensor<1, dim, typename VectorType::value_type>>>(
+          dim, Tensor<1, dim, typename VectorType::value_type>());
+      fe_functions.vector_gradient(x_0, *(jacobian.get()));
+      return jacobian;
+    }
+
+    template <int dim, typename VectorType>
+    std::unique_ptr<Point<dim>>
+    invert_linear_function(std::unique_ptr<std::vector<Tensor<1, dim, typename VectorType::value_type>>> &jacobian,
+                           std::unique_ptr<VectorType> &values)
+    {
+      gsl_matrix *gsl_mat = gsl_matrix_alloc(dim, dim);
+      gsl_vector *value_vector = gsl_vector_alloc(dim);
+      gsl_vector *x = gsl_vector_alloc(dim);
+
+      // Copy data from jac[i][j] into the GSL matrix
+      for (size_t i = 0; i < dim; i++) {
+        gsl_vector_set(value_vector, i, (*values)[i]);
+        for (size_t j = 0; j < dim; j++) {
+          gsl_matrix_set(gsl_mat, i, j, (*jacobian)[i][j]);
+        }
+      }
+
+      // Create GSL matrix and vector views
+      // gsl_matrix_view A = gsl_matrix_view_array(gsl_mat, dim, dim);
+      // gsl_vector_view b = gsl_vector_view_array(values->data(), dim);
+
+      // Allocate memory for solution vector x and permutation
+      gsl_permutation *p = gsl_permutation_alloc(dim);
+      int s;
+
+      // Perform LU decomposition
+      gsl_linalg_LU_decomp(gsl_mat, p, &s);
+
+      // Solve the linear system
+      gsl_linalg_LU_solve(gsl_mat, p, value_vector, x);
+
+      auto result = std::make_unique<Point<dim>>();
+      for (uint i = 0; i < dim; i++)
+        (*result)[i] = gsl_vector_get(x, i);
+
+      // Free allocated memory
+      gsl_permutation_free(p);
+      gsl_vector_free(x);
+      gsl_vector_free(value_vector);
+      gsl_matrix_free(gsl_mat);
+      return result;
+    }
+
+    template <int dim, typename VectorType>
+    std::unique_ptr<Point<dim>> compute_new_x_predition(Point<dim> &x_0, std::unique_ptr<Point<dim>> &offset,
+                                                        VectorType t)
+    {
+      auto x_new = std::make_unique<Point<dim>>(x_0 - t * *offset.get());
+      return x_new;
+    }
+
+    template <int dim>
+    bool point_outside_cell(const typename DoFHandler<dim>::cell_iterator &cell, std::unique_ptr<Point<dim>> &x_new)
+    {
+      return !cell->point_inside(*(x_new.get()));
+    }
+
+    template <int dim, typename VectorType>
+    std::unique_ptr<Point<dim>> find_EoM_in_cell(const typename DoFHandler<dim>::cell_iterator &cell,
+                                                 Functions::FEFieldFunction<dim, VectorType> &fe_functions,
+                                                 uint max_iter = 100, typename VectorType::value_type err = 1e-14)
+    {
+
+      fe_functions.set_active_cell(cell);
+      Point<dim> x_0 = cell->center();
+      for (uint i = 0; i < max_iter; i++) {
+        typename VectorType::value_type t = 1.0;
+        auto values = get_fe_values(fe_functions, x_0);
+        auto jacobian = get_fe_jacobian(fe_functions, x_0);
+        auto offset = invert_linear_function<dim, VectorType>(jacobian, values);
+        auto x_new = compute_new_x_predition(x_0, offset, t);
+        while (point_outside_cell(cell, x_new)) {
+          t /= 2.0; // reduce the stepsize for the predicted point iteratively, until the prediction is inside the cell
+          x_new = compute_new_x_predition(x_0, offset, t);
+        }
+        if ((*(x_new.get()) - x_0).norm() < err) {
+          return x_new;
+        }
+        x_0 = *(x_new.get());
+      }
+      throw std::runtime_error("Root finding did not converged!");
+    }
+
+    template <int dim, typename VectorType, typename EoMFUN>
+    std::array<double, dim> compute_EoM(Point<dim> point, Functions::FEFieldFunction<dim, VectorType> &fe_functions,
+                                        const EoMFUN &get_EoM)
+    {
+      VectorType value_vector(fe_functions.n_components());
+      fe_functions.vector_value(point, value_vector);
+      return get_EoM(point, value_vector);
+    }
+
   } // namespace internal
 
   /**
@@ -107,501 +320,12 @@ namespace DiFfRG
       const EoMPFUN &EoM_postprocess = [](const auto &p, const auto & /* values */) { return p; },
       const double EoM_abs_tol = 1e-5, const uint max_iter = 100)
   {
-    // constexpr uint dim = 1;
-
-    using namespace dealii;
-    Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, sol, mapping);
-
-    auto get_vertex_minimum_of_cell = [](typename DoFHandler<dim>::cell_iterator cell) -> Point<dim> {
-      const auto vertex_number = cell->n_vertices();
-      Point<dim> min_vertex = cell->vertex(0);
-      for (uint i = 1; i < vertex_number; i++) {
-        Point<dim> vertex_i = cell->vertex(i);
-        min_vertex = std::min(min_vertex, vertex_i, internal::point_comperator<dim>);
-      }
-      return min_vertex;
-    };
-
-    auto check_zero_crossing_in_cell = [&fe_function](typename DoFHandler<dim>::cell_iterator cell) -> bool {
-      // const auto vertex_number = reference_cell.n_vertices();
-      const auto vertex_number = cell->n_vertices();
-
-      uint component = 0;
-      bool component_has_EoM;
-      do {
-        component_has_EoM = false;
-        for (uint i = 0; i < vertex_number; i++)
-          for (uint j = 0; j < i; j++) {
-            Point<dim> point_1 = cell->vertex(i);
-            Point<dim> point_2 = cell->vertex(j);
-            auto value_1 = fe_function.value(point_1, component);
-            auto value_2 = fe_function.value(point_2, component);
-            // std::cout << "component: " << component << ", value 1: " << value_1 << ", value 2: " << value_2
-            //           << std::endl;
-            component_has_EoM = component_has_EoM or ((value_1 * value_2) <= 0.0);
-          }
-        component++;
-      } while (component < fe_function.n_components && component_has_EoM);
-      return component_has_EoM;
-    };
-
-    auto compute_cell_minimum = [&fe_function, EoM_abs_tol,
-                                 max_iter](typename DoFHandler<dim>::cell_iterator cell) -> Point<dim> {
-      int status;
-      int iter = 0;
-
-      struct internal::powell_params<dim, VectorType> params = {
-        fe_function
-      };
-      uint components = fe_function.n_components;
-      gsl_multiroot_function f = {&internal::f_function<dim, VectorType>, dim, &params};
-      const gsl_multiroot_fsolver_type *T = gsl_multiroot_fsolver_dnewton;
-      gsl_multiroot_fsolver *s = gsl_multiroot_fsolver_alloc(T, components);
-      gsl_vector *x = gsl_vector_alloc(dim);
-
-      const auto vertex_number = cell->n_vertices();
-      Point<dim> midpoint = Point<dim>();
-      for (uint i = 0; i < vertex_number; i++) {
-        midpoint += cell->vertex(i);
-      }
-      midpoint /= static_cast<double>(vertex_number);
-
-      Point<dim> point_1 = cell->vertex(0);
-      for (uint i = 0; i < dim; i++) {
-        gsl_vector_set(x, i, midpoint[i]);
-      }
-
-      gsl_multiroot_fsolver_set(s, &f, x);
-      do {
-        iter++;
-        status = gsl_multiroot_fsolver_iterate(s);
-
-        if (status) /* check if solver is stuck */
-          break;
-
-        status = gsl_multiroot_test_residual(s->f, EoM_abs_tol);
-      } while (status == GSL_CONTINUE && iter < max_iter);
-      for (uint i = 0; i < dim; i++) {
-        midpoint[i] = gsl_vector_get(s->x, i);
-      }
-      gsl_multiroot_fsolver_free(s);
-      gsl_vector_free(x);
-
-      return midpoint;
-    };
-
-    typename DoFHandler<dim>::cell_iterator origin_Cell = dof_handler.begin_active();
-    Point<dim> origin_point = get_vertex_minimum_of_cell(origin_Cell);
-
-    for (auto &cell : dof_handler.active_cell_iterators()) {
-      fe_function.set_active_cell(cell); // setting the current cell, enhances performance
-      // compute the origin in each iteration
-      Point<dim> cell_minimum = get_vertex_minimum_of_cell(cell);
-      origin_point = std::min(origin_point, cell_minimum, internal::point_comperator<dim>);
-      // check if the current cell contains a minimum (zero crossing)
-      if (check_zero_crossing_in_cell(cell)) {
-        std::cout << "hello" << std::endl;
-        return compute_cell_minimum(cell);
-      }
+    if (EoM_cell.state() == dealii::IteratorState::invalid) {
+      EoM_cell = dof_handler.begin_active();
     }
-
-    // if nothing was found, return the origin
-    // EoM_cell = GridTools::find_active_cell_around_point(dof_handler, origin_point);
-    return origin_point;
+    dealii::Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, sol, mapping);
+    EoM_cell = internal::walk_in_direction(EoM_cell, fe_function);
+    auto EoM = internal::find_EoM_in_cell(EoM_cell, fe_function);
+    return *EoM;
   }
-
-  // /**
-  //  * @brief Get the EoM point for a given solution and model in 2D. This is done by first checking the origin, and
-  //  * then checking all cell borders in order to find a zero crossing. Then, the EoM point is found by bisection
-  //  within
-  //  * the cell.
-  //  *
-  //  * @tparam VectorType type of the solution vector.
-  //  * @tparam Model type of the model.
-  //  * @param EoM_cell the cell where the EoM point is located, will be set by the function. Is also used as a
-  //  starting
-  //  * point for the search.
-  //  * @param sol the solution vector.
-  //  * @param dof_handler a DoFHandler object associated with the solution vector.
-  //  * @param mapping a Mapping object associated with the solution vector.
-  //  * @param model numerical model providing a method EoM(const VectorType &)->double which we use to find a zero
-  //  * crossing.
-  //  * @param EoM_abs_tol the relative tolerance for the bisection method.
-  //  * @return Point<dim> the point where the EoM is zero.
-  //  */
-  // template <int dim, typename VectorType, typename EoMFUN, typename EoMPFUN>
-  // dealii::Point<dim> get_EoM_point_ND(
-  //     typename dealii::DoFHandler<dim>::cell_iterator &EoM_cell, const VectorType &sol,
-  //     const dealii::DoFHandler<dim> &dof_handler, const dealii::Mapping<dim> &mapping, const EoMFUN &get_EoM,
-  //     const EoMPFUN &EoM_postprocess = [](const auto &p, const auto & /* values */) { return p; },
-  //     const double EoM_abs_tol = 1e-8, const uint max_iter = 100)
-  // {
-  //   using namespace dealii;
-  //   using CellIterator = typename dealii::DoFHandler<dim>::cell_iterator;
-  //   using EoMType = std::array<double, dim>;
-  //
-  //   Vector<typename VectorType::value_type> values(dof_handler.get_fe().n_components());
-  //   Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, sol, mapping);
-  //
-  //   // We start by investigating the origin.
-  //   const auto origin = internal::get_origin(dof_handler, EoM_cell);
-  //   fe_function.set_active_cell(EoM_cell);
-  //   fe_function.vector_value(origin, values);
-  //   const auto origin_val = get_EoM(origin, values);
-  //
-  //   const auto secondary_point = (origin + EoM_cell->center()) / 2.;
-  //   fe_function.vector_value(secondary_point, values);
-  //   const auto secondary_val = get_EoM(secondary_point, values);
-  //
-  //   // this actually constrains the EoM to one axis, possibly.
-  //   // in a future version, we should exploit this to reduce the dimensionality of the problem.
-  //   std::array<bool, dim> axis_restrictions{{}};
-  //   for (uint d = 0; d < dim; ++d)
-  //     axis_restrictions[d] = (origin_val[d] >= 0) && (secondary_val[d] >= 0);
-  //
-  //   const bool any_axis_restricted =
-  //       std::any_of(std::begin(axis_restrictions), std::end(axis_restrictions), [](bool i) { return i; });
-  //   const bool all_axis_restricted =
-  //       std::all_of(std::begin(axis_restrictions), std::end(axis_restrictions), [](bool i) { return i; });
-  //
-  //   auto EoM = origin;
-  //   EoM_cell = GridTools::find_active_cell_around_point(dof_handler, EoM);
-  //   if (all_axis_restricted) {
-  //     EoM = origin;
-  //     // std::cout << "All axis restricted" << std::endl;
-  //     return EoM;
-  //   }
-  //
-  //   // std::cout << "Restrictions: ";
-  //   // for (uint d = 0; d < dim; ++d)
-  //   //   std::cout << axis_restrictions[d] << " ";
-  //   // std::cout << std::endl;
-  //
-  //   auto check_cell = [&](const CellIterator &cell) -> bool {
-  //     if (any_axis_restricted && !cell->has_boundary_lines()) return false;
-  //
-  //     // Obtain the values at the vertices of the cell.
-  //     std::array<EoMType, GeometryInfo<dim>::vertices_per_cell> EoM_vals;
-  //     std::array<Point<dim>, GeometryInfo<dim>::vertices_per_cell> vertices;
-  //     Vector<typename VectorType::value_type> values(dof_handler.get_fe().n_components());
-  //     Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, sol, mapping);
-  //
-  //     fe_function.set_active_cell(cell);
-  //     for (uint i = 0; i < GeometryInfo<dim>::vertices_per_cell; ++i) {
-  //       vertices[i] = cell->vertex(i);
-  //       fe_function.vector_value(vertices[i], values);
-  //       EoM_vals[i] = get_EoM(vertices[i], values);
-  //     }
-  //
-  //     if (any_axis_restricted)
-  //       for (uint d = 0; d < dim; ++d)
-  //         if (axis_restrictions[d]) {
-  //           bool has_zero_boundary = false;
-  //           for (uint i = 0; i < GeometryInfo<dim>::vertices_per_cell; ++i)
-  //             if (is_close(origin[d], vertices[i][d], 1e-12)) {
-  //               has_zero_boundary = true;
-  //               break;
-  //             }
-  //           if (!has_zero_boundary) {
-  //             // std::cout << "No zero boundary for cell with vertices: ";
-  //             // for (uint i = 0; i < GeometryInfo<dim>::vertices_per_cell; ++i) {
-  //             // std::cout << "vertex " << i << ": ";
-  //             // for (uint d = 0; d < dim; ++d)
-  //             // std::cout << vertices[i][d] << " ";
-  //             // std::cout << std::endl;
-  //             // }
-  //
-  //             return false;
-  //           }
-  //         }
-  //
-  //     std::array<bool, dim> cell_has_EoM{{}};
-  //     // Find if the cell has an EoM point, i.e. if the values at some vertices have different signs.
-  //     if (!any_axis_restricted) {
-  //       for (uint i = 0; i < GeometryInfo<dim>::vertices_per_cell; ++i)
-  //         for (uint j = 0; j < i; ++j)
-  //           for (uint d = 0; d < dim; ++d)
-  //             cell_has_EoM[d] = cell_has_EoM[d] || (EoM_vals[i][d] * EoM_vals[j][d] < 0.);
-  //     } else {
-  //       std::vector<bool> valid_vertices(GeometryInfo<dim>::vertices_per_cell, true);
-  //
-  //       for (uint d = 0; d < dim; ++d)
-  //         if (axis_restrictions[d])
-  //           for (uint i = 0; i < GeometryInfo<dim>::vertices_per_cell; ++i)
-  //             // if there is a vertex with smaller coordinate in direction d, we set the vertex to invalid
-  //             for (uint j = 0; j < i; ++j) {
-  //               if (vertices[i][d] > vertices[j][d]) {
-  //                 valid_vertices[i] = false;
-  //                 break;
-  //               }
-  //             }
-  //
-  //       for (uint i = 0; i < GeometryInfo<dim>::vertices_per_cell; ++i)
-  //         if (valid_vertices[i])
-  //           for (uint j = 0; j < i; ++j)
-  //             if (valid_vertices[j])
-  //               for (uint d = 0; d < dim; ++d)
-  //                 cell_has_EoM[d] = cell_has_EoM[d] || (EoM_vals[i][d] * EoM_vals[j][d] < 0.);
-  //     }
-  //
-  //     bool has_EoM = true;
-  //     for (uint d = 0; d < dim; ++d)
-  //       if (!axis_restrictions[d]) has_EoM = has_EoM && cell_has_EoM[d];
-  //     // if all components have a potential crossing, we return true
-  //     return has_EoM;
-  //   };
-  //
-  //   gsl_set_error_handler_off();
-  //
-  //   auto find_EoM = [&](const CellIterator &cell, CellIterator &m_EoM_cell, Point<dim> &m_EoM,
-  //                       double &EoM_val) -> bool {
-  //     Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, sol, mapping);
-  //     Vector<typename VectorType::value_type> values(dof_handler.get_fe().n_components());
-  //     fe_function.set_active_cell(cell);
-  //
-  //     // find the cell boundaries
-  //     std::array<std::array<double, 2>, dim> cell_boundaries{{}};
-  //     for (uint d = 0; d < dim; ++d) {
-  //       cell_boundaries[d][0] = cell->center()[d];
-  //       cell_boundaries[d][1] = cell->center()[d];
-  //     }
-  //     for (uint d = 0; d < dim; ++d) {
-  //       for (uint i = 0; i < GeometryInfo<dim>::vertices_per_cell; ++i) {
-  //         cell_boundaries[d][0] = std::min(cell_boundaries[d][0], cell->vertex(i)[d]);
-  //         cell_boundaries[d][1] = std::max(cell_boundaries[d][1], cell->vertex(i)[d]);
-  //       }
-  //     }
-  //
-  //     int subdim = dim;
-  //     for (uint d = 0; d < dim; ++d)
-  //       if (axis_restrictions[d]) subdim--;
-  //
-  //     if (subdim == 1) {
-  //       uint dir = 0;
-  //       for (uint d = 0; d < dim; ++d)
-  //         if (!axis_restrictions[d]) dir = d;
-  //
-  //       // utlize the fact that we have a 1D problem and we can just do a bisection
-  //       Point<dim> p1{};
-  //       Point<dim> p2{};
-  //       for (uint d = 0; d < dim; ++d) {
-  //         p1[d] = cell_boundaries[d][0];
-  //         p2[d] = cell_boundaries[d][0];
-  //       }
-  //       p2[dir] = cell_boundaries[dir][1];
-  //       auto p = (p1 + p2) / 2.;
-  //
-  //       fe_function.vector_value(p, values);
-  //       EoM_val = get_EoM(p, values)[dir];
-  //       double err = 1e100;
-  //       uint iter = 0;
-  //
-  //       while (err > EoM_abs_tol) {
-  //         if (EoM_val < 0.)
-  //           p1 = p;
-  //         else
-  //           p2 = p;
-  //         p = (p1 + p2) / 2.;
-  //
-  //         fe_function.vector_value(p, values);
-  //         EoM_val = get_EoM(p, values)[dir];
-  //         err = std::abs(EoM_val);
-  //
-  //         if (iter > max_iter) {
-  //           m_EoM = EoM_postprocess(p, values);
-  //           m_EoM_cell = cell;
-  //           return false;
-  //         }
-  //         iter++;
-  //       }
-  //
-  //       m_EoM = EoM_postprocess(p, values);
-  //       m_EoM_cell = cell;
-  //
-  //       return true;
-  //     }
-  //
-  //     std::function<std::array<double, dim>(const dealii::Point<dim> &)> eval_on_point =
-  //         [&](const Point<dim> &p) -> std::array<double, dim> {
-  //       Point<dim> p_proj = p;
-  //       for (uint d = 0, i = 0; d < dim; ++d)
-  //         p_proj[d] = axis_restrictions[d] ? origin[d] : p[i++];
-  //
-  //       // check if the point is inside the cell
-  //       std::array<double, dim> out_distance{{}};
-  //       for (uint d = 0; d < dim; ++d) {
-  //         if (p_proj[d] < cell_boundaries[d][0]) {
-  //           out_distance[d] = std::abs(p_proj[d] - cell_boundaries[d][0]);
-  //           p_proj[d] = cell_boundaries[d][0];
-  //           // std::cout << "Point outside cell" << std::endl;
-  //           // std::cout << "Point: " << p << std::endl;
-  //         } else if (p_proj[d] > cell_boundaries[d][1]) {
-  //           out_distance[d] = std::abs(p_proj[d] - cell_boundaries[d][1]);
-  //           p_proj[d] = cell_boundaries[d][1];
-  //           // std::cout << "Point outside cell" << std::endl;
-  //           // std::cout << "Point: " << p << std::endl;
-  //         }
-  //       }
-  //
-  //       try {
-  //         fe_function.vector_value(p_proj, values);
-  //       } catch (...) {
-  //         // if p is outside the triangulation, give a default value
-  //         return std::array<double, dim>{{
-  //             std::numeric_limits<double>::quiet_NaN(),
-  //         }};
-  //       }
-  //
-  //       auto EoM = get_EoM(p, values);
-  //
-  //       // if (out_distance[d] > 0), linearly extrapolate the value
-  //       for (uint d = 0; d < dim; ++d)
-  //         if (out_distance[d] > 0) {
-  //           // std::cout << "Extrapolating value from " << EoM[d];
-  //           EoM[d] = is_close(EoM[d], 0.) ? out_distance[d] : EoM[d] * (1 + out_distance[d]);
-  //           // std::cout << " to " << EoM[d] << std::endl;
-  //         }
-  //
-  //       // reshuflle the values to the correct order
-  //       std::array<double, dim> EoM_out{{}};
-  //       for (uint d = 0, i = 0; d < dim; ++d)
-  //         if (!axis_restrictions[d]) EoM_out[d] = EoM[i++];
-  //
-  //       return EoM_out;
-  //     };
-  //
-  //     const auto cell_center = cell->center();
-  //     std::vector<double> subdim_center(subdim);
-  //     for (uint d = 0, i = 0; d < dim; ++d)
-  //       if (!axis_restrictions[d]) subdim_center[i++] = cell_center[d];
-  //
-  //     // Create GSL multiroot solver
-  //     const gsl_multiroot_fsolver_type *T = gsl_multiroot_fsolver_hybrids;
-  //     gsl_multiroot_fsolver *s = gsl_multiroot_fsolver_alloc(T, subdim);
-  //
-  //     // Create GSL function
-  //     gsl_multiroot_function f = {&internal::gsl_unwrap<dim>, (size_t)subdim, &eval_on_point};
-  //
-  //     // Create initial guess
-  //     gsl_vector *x = gsl_vector_alloc(subdim);
-  //     for (int d = 0; d < subdim; ++d)
-  //       gsl_vector_set(x, d, subdim_center[d]);
-  //
-  //     // Set the solver with the function and initial guess
-  //     gsl_multiroot_fsolver_set(s, &f, x);
-  //
-  //     // start the iteration
-  //     uint iter = 0;
-  //     int status;
-  //     do {
-  //       iter++;
-  //       status = gsl_multiroot_fsolver_iterate(s);
-  //
-  //       if (status) break;
-  //
-  //       status = gsl_multiroot_test_residual(s->f, EoM_abs_tol);
-  //
-  //     } while (status == GSL_CONTINUE && iter < max_iter);
-  //
-  //     EoM_val = 0.;
-  //     for (uint d = 0, sd = 0; d < dim; ++d)
-  //       m_EoM[d] = axis_restrictions[d] ? origin[d] : gsl_vector_get(s->x, sd++);
-  //
-  //     // don't leak memory. Stupid C
-  //     gsl_multiroot_fsolver_free(s);
-  //     gsl_vector_free(x);
-  //
-  //     if (status != GSL_SUCCESS) return false;
-  //
-  //     m_EoM = EoM_postprocess(m_EoM, values);
-  //     m_EoM_cell = internal::is_in_cell(cell, m_EoM, mapping)
-  //                      ? cell
-  //                      : GridTools::find_active_cell_around_point(dof_handler, m_EoM);
-  //
-  //     return true;
-  //   };
-  //
-  //   std::vector<typename dealii::DoFHandler<dim>::cell_iterator> cell_candidates;
-  //   std::vector<double> value_candidates;
-  //   std::vector<Point<dim>> EoM_candidates;
-  //
-  //   // mutex for the EoM cell
-  //   // std::mutex EoM_cell_mutex;
-  //
-  //   const uint n_active_cells = dof_handler.get_triangulation().n_active_cells();
-  //
-  //   // this needs to be done smarter, but for now we just iterate over all cells
-  //   // preferrably, we would divide the full domain into smaller subdomains and then traverse a kind of tree.
-  //   for (uint index = 0; index < n_active_cells; ++index) {
-  //     auto cell = dof_handler.begin_active();
-  //     std::advance(cell, index);
-  //     if (check_cell(cell)) {
-  //       Point<dim> t_EoM = cell->center();
-  //       CellIterator t_EoM_cell = cell;
-  //       double t_EoM_value = 0.;
-  //
-  //       // lock the mutex
-  //       // std::lock_guard<std::mutex> lock(EoM_cell_mutex);
-  //
-  //       if (find_EoM(cell, t_EoM_cell, t_EoM, t_EoM_value)) {
-  //         // std::cout << "Found EoM point in cell " << index << std::endl;
-  //         // std::cout << "EoM: " << t_EoM << std::endl;
-  //         EoM = t_EoM;
-  //         EoM_cell = dealii::GridTools::find_active_cell_around_point(dof_handler, EoM);
-  //         return EoM;
-  //       }
-  //
-  //       cell_candidates.push_back(t_EoM_cell);
-  //       EoM_candidates.push_back(t_EoM);
-  //       value_candidates.push_back(std::abs(t_EoM_value));
-  //     }
-  //   }
-  //
-  //   // std::cout << "Found " << cell_candidates.size() << " candidates." << std::endl;
-  //
-  //   double EoM_value = 0.;
-  //
-  //   if (cell_candidates.size() == 1) {
-  //     if (find_EoM(cell_candidates[0], EoM_cell, EoM, EoM_value)) return EoM;
-  //   } else if (cell_candidates.size() == 0) {
-  //     EoM_cell = GridTools::find_active_cell_around_point(dof_handler, origin);
-  //     return origin;
-  //   } else if (cell_candidates.size() > 1) {
-  //     // If we have more than one candidate, we choose the one with the smallest EoM value.
-  //     auto min_it = std::min_element(value_candidates.begin(), value_candidates.end());
-  //     auto min_idx = std::distance(value_candidates.begin(), min_it);
-  //     EoM_cell = cell_candidates[min_idx];
-  //     EoM = EoM_candidates[min_idx];
-  //     return EoM;
-  //   }
-  //
-  //   return EoM;
-  // }
-
-  // /**
-  //  * @brief Get the EoM point for a given solution and model.
-  //  *
-  //  * @tparam dim dimension of the problem.
-  //  * @tparam VectorType type of the solution vector.
-  //  * @tparam Model type of the model.
-  //  * @param EoM_cell the cell where the EoM point is located, will be set by the function. Is also used as a starting
-  //  * point for the search.
-  //  * @param sol the solution vector.
-  //  * @param dof_handler a DoFHandler object associated with the solution vector.
-  //  * @param mapping a Mapping object associated with the solution vector.
-  //  * @param model numerical model providing a method EoM(const VectorType &)->double which we use to find a zero
-  //  * crossing.
-  //  * @param EoM_abs_tol the relative tolerance for the bisection method.
-  //  * @return Point<dim> the point where the EoM is zero.
-  //  */
-  // template <int dim, typename VectorType, typename EoMFUN, typename EoMPFUN>
-  // dealii::Point<dim> get_EoM_point(
-  //     typename dealii::DoFHandler<dim>::cell_iterator &EoM_cell, const VectorType &sol,
-  //     const dealii::DoFHandler<dim> &dof_handler, const dealii::Mapping<dim> &mapping, const EoMFUN &get_EoM,
-  //     const EoMPFUN &EoM_postprocess = [](const auto &p, const auto & /* values */) { return p; },
-  //     const double EoM_abs_tol = 1e-5, const uint max_iter = 100)
-  // {
-  //   // if (max_iter == 0) return internal::get_origin(dof_handler, EoM_cell);
-  //   return get_EoM_point_1D(EoM_cell, sol, dof_handler, mapping, get_EoM, EoM_postprocess, EoM_abs_tol, max_iter);
-  // }
 } // namespace DiFfRG
