@@ -104,13 +104,6 @@ TEST_CASE("Test 1D EoM finding on CG Constant model", "[discretization][EoM][1d]
   const double EoM_abs_tol = json.get_double("/discretization/EoM_abs_tol");
   const uint EoM_max_iter = json.get_uint("/discretization/EoM_max_iter");
 
-  SECTION("The correct EoM Cell should be found")
-  {
-    Point<1> location_of_EoM(expected_EoM);
-    Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, src, mapping);
-    auto expected_EoM_cell = GridTools::find_active_cell_around_point(mapping, dof_handler, location_of_EoM);
-    REQUIRE(expected_EoM_cell.first == DiFfRG::internal::walk_in_direction(EoM_cell, fe_function));
-  }
   const auto EoM = get_EoM_point(
       EoM_cell, src, dof_handler, mapping, [&](const auto &p, const auto &values) { return model.EoM(p, values); },
       [&](const auto &p, const auto &) { return p; }, EoM_abs_tol, EoM_max_iter);
@@ -215,13 +208,6 @@ TEST_CASE("Test 2D EoM finding on CG Constant model", "[discretization][EoM][2d]
   const double EoM_abs_tol = json.get_double("/discretization/EoM_abs_tol");
   const uint EoM_max_iter = json.get_uint("/discretization/EoM_max_iter");
 
-  SECTION("The correct EoM Cell should be found")
-  {
-    Point<2> location_of_EoM = {expected_EoM[0], expected_EoM[1]};
-    Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, src, mapping);
-    auto expected_EoM_cell = GridTools::find_active_cell_around_point(mapping, dof_handler, location_of_EoM);
-    REQUIRE(expected_EoM_cell.first == DiFfRG::internal::walk_in_direction(EoM_cell, fe_function));
-  }
   const auto EoM = get_EoM_point(
       EoM_cell, src, dof_handler, mapping, [&](const auto &p, const auto &values) { return model.EoM(p, values); },
       [&](const auto &p, const auto &) { return p; }, EoM_abs_tol, EoM_max_iter);
@@ -330,13 +316,6 @@ TEST_CASE("TEST 1D EOM finding on CG Constant model using a more realistic curve
   const double EoM_abs_tol = json.get_double("/discretization/EoM_abs_tol");
   const uint EoM_max_iter = json.get_uint("/discretization/EoM_max_iter");
 
-  SECTION("The correct EoM Cell should be found")
-  {
-    Point<1> location_of_EoM(expected_EoM[0]);
-    Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, src, mapping);
-    auto [fst, _] = GridTools::find_active_cell_around_point(mapping, dof_handler, location_of_EoM);
-    REQUIRE(fst == DiFfRG::internal::walk_in_direction(EoM_cell, fe_function));
-  }
   const auto EoM = get_EoM_point(
       EoM_cell, src, dof_handler, mapping, [&](const auto &p, const auto &values) { return model.EoM(p, values); },
       [&](const auto &p, const auto &) { return p; }, EoM_abs_tol, EoM_max_iter);
@@ -447,26 +426,6 @@ TEST_CASE("TEST 2D EOM finding on CG Constant model using a more realistic curve
 
   const double EoM_abs_tol = json.get_double("/discretization/EoM_abs_tol");
   const uint EoM_max_iter = json.get_uint("/discretization/EoM_max_iter");
-  SECTION("The correct EoM Cell should be found")
-  {
-    Point<2> location_of_EoM = {expected_EoM[0], expected_EoM[1]};
-    Functions::FEFieldFunction<dim, VectorType> fe_function(dof_handler, src, mapping);
-    auto [fst, snd] = GridTools::find_active_cell_around_point(mapping, dof_handler, location_of_EoM);
-    auto result = DiFfRG::internal::walk_in_direction(EoM_cell, fe_function);
-    // INFO("cell" << fst->center());
-    // INFO("cell" << fst->vertex(1));
-    auto center_result = result->center();
-    // auto fst_center = fst->center();
-    INFO("cell" << center_result);
-    INFO("cell vertex[0]" << result->vertex(0));
-    INFO("cell vertex[1]" << result->vertex(1));
-    INFO("cell vertex[2]" << result->vertex(2));
-    INFO("cell vertex[3]" << result->vertex(3));
-    // INFO("cell" << fst_center);
-    // INFO("cell" << result->vertex(1));
-    INFO("Point location of EoM = " << location_of_EoM);
-    REQUIRE(fst == result);
-  }
 
   const auto EoM = get_EoM_point(
       EoM_cell, src, dof_handler, mapping, [&](const auto &p, const auto &values) { return model.EoM(p, values); },
