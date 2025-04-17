@@ -136,6 +136,68 @@ namespace DiFfRG
       return walk_in_direction<dim, VectorType>(active_new_cell, compute_EoM);
     }
 
+    // ################################################################################################
+    //                          The code above handles the cell finding
+    //                          Below is the code, which handels the EoM finding inside the cell
+    // ################################################################################################
+
+    template <int dim>
+    Point<dim> perform_1D_bisection(const typename DoFHandler<dim>::cell_iterator &cell,
+                                    EoMPointCellFunction<dim> &compute_EoM, const double EoM_abs_tol,
+                                    const uint max_iter)
+    {
+      Point<dim> point_1 = cell->vertex(0);
+      Point<dim> point_2 = cell->vertex(1);
+      for (uint iter = 0; iter <= max_iter; iter++) {
+        Point<dim> point_mid = 0.5 * (point_1 + point_2);
+        if ((point_1 - point_2).norm() > EoM_abs_tol) {
+          auto value_mid = compute_EoM(point_mid, cell)[0];
+          if (value_mid > 0) {
+            point_2 = point_mid;
+          } else {
+            point_1 = point_mid;
+          }
+        } else {
+          return point_mid;
+        }
+      }
+    }
+
+    template <int dim>
+    std::tuple<bool, Point<dim>> check_if_EoM_lies_on_vertex(const typename DoFHandler<dim>::cell_iterator &cell,
+                                                             EoMPointCellFunction<dim> &compute_EoM)
+    {
+      Point<dim> point_1 = cell->vertex(0);
+      Point<dim> point_2 = cell->vertex(1);
+      auto value_1 = compute_EoM(point_1, cell);
+      std::cout << "here the error 1 occures" << value_1[0] << std::endl;
+      auto value_2 = compute_EoM(point_2, cell);
+      std::cout << "here the error 2 occures" << value_2[0] << std::endl;
+      if (value_1[0] * value_2[0] >= 0) {
+        std::cout << "here the error 3 occures" << std::endl;
+        if (value_1[0] > value_2[0]) {
+          return std::make_tuple(true, point_2);
+        }
+        return std::make_tuple(true, point_1);
+      }
+      return std::make_tuple(false, cell->vertex(0));
+    }
+
+    template <int dim, typename VectorType>
+    Point<dim> comopute_in_cell_EoM(const typename DoFHandler<dim>::cell_iterator &cell,
+                                    EoMPointCellFunction<dim> &compute_EoM, const double EoM_abs_tol,
+                                    const uint max_iter)
+    {
+      std::cout << "hello" << std::endl;
+      auto [EoM_is_on_boundary, vertex] = check_if_EoM_lies_on_vertex<dim>(cell, compute_EoM);
+      if (EoM_is_on_boundary) {
+        return vertex;
+      } else {
+        return perform_1D_bisection<dim>(cell, compute_EoM, EoM_abs_tol, max_iter);
+      }
+      // return cell->center();
+    }
+
   } // namespace internal
 
   /**
@@ -175,8 +237,10 @@ namespace DiFfRG
       return get_EoM(point, sol);
     };
     EoM_cell = internal::walk_in_direction<dim, VectorType>(EoM_cell, compute_EoM);
-    dealii::Point<dim> EoM = EoM_cell->center();
+    dealii::Point<dim> EoM =
+        internal::comopute_in_cell_EoM<dim, VectorType>(EoM_cell, compute_EoM, EoM_abs_tol, max_iter);
 
+    // return EoM_cell->center();
     return EoM;
     // auto EoM = internal::find_EoM_in_cell(EoM_cell, fe_function);
     // return *EoM;
