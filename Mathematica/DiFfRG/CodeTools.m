@@ -1314,7 +1314,7 @@ If[kernel["AD"],"
       const std::array<uint, "<>ToString[gridSizes]<>"> grid_sizes;
       std::array<uint, "<>ToString[gridSizes]<>"> jac_grid_sizes;
       const "<>projcetComplexToCtype[computeType]<>" x_extent;
-      const "<>computeType<>" jacobian_quadrature_factor;
+      const "<>projcetComplexToCtype[computeType]<>" jacobian_quadrature_factor;
 	  const JSONValue json;
 
       std::unique_ptr<"<>integrator<>"> integrator;"<>
